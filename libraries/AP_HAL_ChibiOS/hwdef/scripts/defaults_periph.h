@@ -156,10 +156,6 @@
 #define AP_SERVORELAYEVENTS_ENABLED 0
 #endif
 
-#ifndef AP_RELAY_ENABLED
-#define AP_RELAY_ENABLED 0
-#endif
-
 /*
  * sanity checks that hwdefs are up-to-date in terms of how they are
  * trying to configure the peripheral:
@@ -375,6 +371,15 @@
 #ifndef AP_RPM_ENABLED
 #define AP_RPM_ENABLED AP_PERIPH_RPM_ENABLED
 #endif
+#ifndef AP_TEMPERATURE_SENSOR_ENABLED
+#define AP_TEMPERATURE_SENSOR_ENABLED AP_PERIPH_DEVICE_TEMPERATURE_ENABLED
+#endif
+#ifndef HAL_MSP_ENABLED
+#define HAL_MSP_ENABLED AP_PERIPH_MSP_ENABLED
+#endif
+#ifndef AP_RELAY_ENABLED
+#define AP_RELAY_ENABLED AP_PERIPH_RELAY_ENABLED
+#endif
 
 /*
  * GPS Backends - we selectively turn backends on.
@@ -424,8 +429,8 @@
 #define AP_GPS_NOVA_ENABLED AP_PERIPH_GPS_ENABLED
 #endif
 
-#ifndef HAL_SIM_GPS_ENABLED
-#define HAL_SIM_GPS_ENABLED (AP_SIM_ENABLED && AP_GPS_ENABLED)
+#ifndef AP_SIM_GPS_ENABLED
+#define AP_SIM_GPS_ENABLED (AP_SIM_ENABLED && AP_GPS_ENABLED)
 #endif
 
 /*
@@ -476,6 +481,10 @@
 #ifndef AP_BATT_MONITOR_MAX_INSTANCES
 #define AP_BATT_MONITOR_MAX_INSTANCES 1
 #endif
+
+#ifndef AP_BATTERY_SUM_ENABLED
+#define AP_BATTERY_SUM_ENABLED 0  // needs three backends
+#endif  // AP_BATTERY_SUM_ENABLED
 
 // Capacity tracking off
 #ifndef AP_BATT_MONITOR_BATTERY_CAPACITY

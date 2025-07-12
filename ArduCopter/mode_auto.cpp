@@ -647,21 +647,21 @@ bool ModeAuto::use_pilot_yaw(void) const
     return allow_yaw_option || rtl_allow_yaw || landing;
 }
 
-bool ModeAuto::set_speed_xy(float speed_xy_cms)
+bool ModeAuto::set_speed_xy_cms(float speed_xy_cms)
 {
     copter.wp_nav->set_speed_NE_cms(speed_xy_cms);
     desired_speed_override.xy = speed_xy_cms * 0.01;
     return true;
 }
 
-bool ModeAuto::set_speed_up(float speed_up_cms)
+bool ModeAuto::set_speed_up_cms(float speed_up_cms)
 {
     copter.wp_nav->set_speed_up_cms(speed_up_cms);
     desired_speed_override.up = speed_up_cms * 0.01;
     return true;
 }
 
-bool ModeAuto::set_speed_down(float speed_down_cms)
+bool ModeAuto::set_speed_down_cms(float speed_down_cms)
 {
     copter.wp_nav->set_speed_down_cms(speed_down_cms);
     desired_speed_override.down = speed_down_cms * 0.01;
@@ -865,15 +865,15 @@ float ModeAuto::wp_distance_m() const
     }
 }
 
-int32_t ModeAuto::wp_bearing() const
+float ModeAuto::wp_bearing_deg() const
 {
     switch (_mode) {
     case SubMode::CIRCLE:
-        return copter.circle_nav->get_bearing_to_target_cd();
+        return degrees(copter.circle_nav->get_bearing_to_target_rad());
     case SubMode::WP:
     case SubMode::CIRCLE_MOVE_TO_EDGE:
     default:
-        return wp_nav->get_wp_bearing_to_destination_cd();
+        return degrees(wp_nav->get_wp_bearing_to_destination_rad());
     }
 }
 
@@ -1223,12 +1223,13 @@ void ModeAuto::nav_attitude_time_run()
     target_climb_rate_cms = get_avoidance_adjusted_climbrate_cms(target_climb_rate_cms);
 
     // limit and scale lean angles
-    const float angle_limit_cd = MAX(1000.0f, MIN(copter.aparm.angle_max, attitude_control->get_althold_lean_angle_max_cd()));
-    Vector2f target_rp_cd(nav_attitude_time.roll_deg * 100, nav_attitude_time.pitch_deg * 100);
-    target_rp_cd.limit_length(angle_limit_cd);
+    // todo: change euler magnitiude limit to lean angle limit
+    const float angle_limit_rad = MAX(radians(10.0f), MIN(attitude_control->lean_angle_max_rad(), attitude_control->get_althold_lean_angle_max_rad()));
+    Vector2f target_rp_rad(radians(nav_attitude_time.roll_deg), radians(nav_attitude_time.pitch_deg));
+    target_rp_rad.limit_length(angle_limit_rad);
 
     // send targets to attitude controller
-    attitude_control->input_euler_angle_roll_pitch_yaw_cd(target_rp_cd.x, target_rp_cd.y, nav_attitude_time.yaw_deg * 100, true);
+    attitude_control->input_euler_angle_roll_pitch_yaw_rad(target_rp_rad.x, target_rp_rad.y, radians(nav_attitude_time.yaw_deg), true);
 
     // Send the commanded climb rate to the position controller
     pos_control->set_pos_target_U_from_climb_rate_cm(target_climb_rate_cms);
@@ -1929,9 +1930,9 @@ void ModeAuto::do_within_distance(const AP_Mission::Mission_Command& cmd)
 
 void ModeAuto::do_yaw(const AP_Mission::Mission_Command& cmd)
 {
-    auto_yaw.set_fixed_yaw(
-        cmd.content.yaw.angle_deg,
-        cmd.content.yaw.turn_rate_dps,
+    auto_yaw.set_fixed_yaw_rad(
+        radians(cmd.content.yaw.angle_deg),
+        radians(cmd.content.yaw.turn_rate_dps),
         cmd.content.yaw.direction,
         cmd.content.yaw.relative_angle > 0);
 }

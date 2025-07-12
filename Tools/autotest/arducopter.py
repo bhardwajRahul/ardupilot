@@ -29,7 +29,7 @@ from vehicle_test_suite import MAV_POS_TARGET_TYPE_MASK
 from vehicle_test_suite import WaitAndMaintainArmed
 from vehicle_test_suite import WaitModeTimeout
 
-from pymavlink.rotmat import Vector3
+from pymavlink.rotmat import Vector3, Matrix3
 
 # get location of scripts
 testdir = os.path.dirname(os.path.realpath(__file__))
@@ -2970,6 +2970,77 @@ class AutoTestCopter(vehicle_test_suite.TestSuite):
             if ogains[g] != ngains[g]:
                 raise NotAchievedException(f"AUTOTUNE gains not discarded {ogains=} {ngains=}")
 
+    def EKF3SRCPerCore(self):
+        '''Check SP/SH values in XKF4 for GPS (core 0) vs VICON (core 1) with targeted glitches.'''
+        self.set_parameters({
+            "EK3_ENABLE": 1,
+            "AHRS_EKF_TYPE": 3,
+            "VISO_TYPE": 2,
+            "SERIAL5_PROTOCOL": 2,
+            "EK3_SRC2_POSXY": 6,
+            "EK3_SRC2_VELXY": 6,
+            "EK3_SRC2_POSZ": 6,
+            "EK3_SRC2_VELZ": 6,
+            "EK3_SRC2_YAW": 6,
+            "EK3_SRC_OPTIONS": 8  # bitmask: enable multiple EKF cores
+        })
+
+        self.customise_SITL_commandline(["--serial5=sim:vicon"])
+        self.reboot_sitl()
+
+        self.wait_ready_to_arm()
+        self.takeoff(3)
+        self.delay_sim_time(5)
+
+        self.progress("Injecting VICON glitch")
+        self.set_parameter("SIM_VICON_GLIT_X", 100)
+        self.set_parameter("SIM_VICON_GLIT_Y", 100)
+        self.delay_sim_time(5)
+        self.set_parameter("SIM_VICON_GLIT_X", 0)
+        self.set_parameter("SIM_VICON_GLIT_Y", 0)
+
+        self.progress("Injecting BARO glitch")
+        self.set_parameter("SIM_BARO_GLITCH", 10)
+        self.delay_sim_time(5)
+        self.set_parameter("SIM_BARO_GLITCH", 0)
+
+        self.do_RTL()
+        self.wait_disarmed(timeout=100)
+
+        dfreader = self.dfreader_for_current_onboard_log()
+
+        max_SP_core0 = 0
+        max_SP_core1 = 0
+        max_SH_core0 = 0
+        max_SH_core1 = 0
+
+        while True:
+            m = dfreader.recv_match(type="XKF4")
+            if m is None:
+                break
+            if not hasattr(m, "C"):
+                continue
+            if m.C == 0:
+                max_SP_core0 = max(max_SP_core0, m.SP)
+                max_SH_core0 = max(max_SH_core0, m.SH)
+            elif m.C == 1:
+                max_SP_core1 = max(max_SP_core1, m.SP)
+                max_SH_core1 = max(max_SH_core1, m.SH)
+
+        self.progress(f"Core 0 (GPS): SP={max_SP_core0:.2f}, SH={max_SH_core0:.2f}")
+        self.progress(f"Core 1 (VICON): SP={max_SP_core1:.2f}, SH={max_SH_core1:.2f}")
+
+        # Validate: horizontal glitch only on core 1, vertical glitch only on core 0
+        if max_SP_core0 > 0.1:
+            raise NotAchievedException("Unexpected high SP in core 0 (GPS) during VICON glitch")
+        if max_SP_core1 < 0.9:
+            raise NotAchievedException("VICON glitch did not raise SP in core 1")
+
+        if max_SH_core1 > 0.5:
+            raise NotAchievedException("Unexpected high SH in core 1 (VICON) during BARO glitch")
+        if max_SH_core0 < 0.9:
+            raise NotAchievedException("BARO glitch did not raise SH in core 0")
+
     def AutoTuneSwitch(self):
         """Test autotune on a switch with gains being saved"""
 
@@ -5346,9 +5417,10 @@ class AutoTestCopter(vehicle_test_suite.TestSuite):
         #        print("r=%s" % str(r))
         return r * vector
 
-    def precision_loiter_to_pos(self, x, y, z, timeout=40):
+    def precision_loiter_to_pos(self, x, y, z, send_bf=True, timeout=40):
         '''send landing_target messages at vehicle until it arrives at
-        location to x, y, z from origin (in metres), z is *up*'''
+        location to x, y, z from origin (in metres), z is *up*
+        if send_bf is True then targets sent in body-frame, if False then sent in local FRD frame'''
         dest_ned = rotmat.Vector3(x, y, -z)
         tstart = self.get_sim_time()
         success_start = -1
@@ -5378,22 +5450,38 @@ class AutoTestCopter(vehicle_test_suite.TestSuite):
             else:
                 success_start = -1
 
-            delta_bf = self.earth_to_body(delta_ef)
-            #            print("delta_bf=%s" % str(delta_bf))
-            angle_x = math.atan2(delta_bf.y, delta_bf.z)
-            angle_y = -math.atan2(delta_bf.x, delta_bf.z)
-            distance = math.sqrt(delta_bf.x * delta_bf.x +
-                                 delta_bf.y * delta_bf.y +
-                                 delta_bf.z * delta_bf.z)
-            #            att = self.mav.messages["ATTITUDE"]
-            #            print("r=%f p=%f y=%f" % (math.degrees(att.roll), math.degrees(att.pitch), math.degrees(att.yaw)))
-            #            print("angle_x=%s angle_y=%s" % (str(math.degrees(angle_x)), str(math.degrees(angle_y))))
-            #            print("distance=%s" % str(distance))
+            mav_frame = None
+            if send_bf:
+                # rotate delta_ef from NED to body frame FRD
+                delta_bf = self.earth_to_body(delta_ef)
+                print("delta_bf=%s" % str(delta_bf))
+                angle_x = math.atan2(delta_bf.y, delta_bf.z)
+                angle_y = -math.atan2(delta_bf.x, delta_bf.z)
+                distance = math.sqrt(delta_bf.x * delta_bf.x +
+                                     delta_bf.y * delta_bf.y +
+                                     delta_bf.z * delta_bf.z)
+                mav_frame = mavutil.mavlink.MAV_FRAME_BODY_FRD
+            else:
+                # rotate delta_ef from NED to Local FRD
+                rotmat_yaw = Matrix3()
+                rotmat_yaw.rotate_yaw(self.mav.messages["ATTITUDE"].yaw)
+                delta_local_frd = rotmat_yaw * delta_ef
+                angle_x = math.atan2(delta_local_frd.y, delta_local_frd.z)
+                angle_y = -math.atan2(delta_local_frd.x, delta_local_frd.z)
+                distance = math.sqrt(delta_local_frd.x * delta_local_frd.x +
+                                     delta_local_frd.y * delta_local_frd.y +
+                                     delta_local_frd.z * delta_local_frd.z)
+                mav_frame = mavutil.mavlink.MAV_FRAME_LOCAL_FRD
+
+            # att = self.mav.messages["ATTITUDE"]
+            # print("r=%f p=%f y=%f" % (math.degrees(att.roll), math.degrees(att.pitch), math.degrees(att.yaw)))
+            # print("angle_x=%s angle_y=%s" % (str(math.degrees(angle_x)), str(math.degrees(angle_y))))
+            # print("distance=%s" % str(distance))
 
             self.mav.mav.landing_target_send(
                 0, # time_usec
                 1, # target_num
-                mavutil.mavlink.MAV_FRAME_GLOBAL, # frame; AP ignores
+                mav_frame, # frame
                 angle_x, # angle x (radians)
                 angle_y, # angle y (radians)
                 distance, # distance to target
@@ -7779,11 +7867,14 @@ class AutoTestCopter(vehicle_test_suite.TestSuite):
         self.set_rc(7, 2000)
 
         # try to drag aircraft to a position 5 metres north-east-east:
-        self.precision_loiter_to_pos(start.x + 5, start.y + 10, start.z + 10)
+        self.precision_loiter_to_pos(start.x + 5, start.y + 10, start.z + 10, True)
         self.wait_statustext("PrecLand: Target Found", check_context=True, timeout=10)
         self.wait_statustext("PrecLand: Init Complete", check_context=True, timeout=10)
         # .... then northwest
-        self.precision_loiter_to_pos(start.x + 5, start.y - 10, start.z + 10)
+        self.precision_loiter_to_pos(start.x + 5, start.y - 10, start.z + 10, True)
+
+        # repeat using earth-frame targets
+        self.precision_loiter_to_pos(start.x + 5, start.y - 10, start.z + 10, False)
 
         self.disarm_vehicle(force=True)
 
@@ -12500,33 +12591,21 @@ class AutoTestCopter(vehicle_test_suite.TestSuite):
         self.context_pop()
         self.reboot_sitl()
 
-    def turn_safety_x(self, value):
-        self.mav.mav.set_mode_send(
-            self.mav.target_system,
-            mavutil.mavlink.MAV_MODE_FLAG_DECODE_POSITION_SAFETY,
-            value)
-
-    def turn_safety_off(self):
-        self.turn_safety_x(0)
-
-    def turn_safety_on(self):
-        self.turn_safety_x(1)
-
     def SafetySwitch(self):
         '''test safety switch behaviour'''
         self.wait_ready_to_arm()
 
-        self.turn_safety_on()
+        self.set_safetyswitch_on()
         self.assert_prearm_failure("safety switch")
 
-        self.turn_safety_off()
+        self.set_safetyswitch_off()
         self.wait_ready_to_arm()
 
         self.takeoff(2, mode='LOITER')
-        self.turn_safety_on()
+        self.set_safetyswitch_on()
 
         self.wait_servo_channel_value(1, 0)
-        self.turn_safety_off()
+        self.set_safetyswitch_off()
 
         self.change_mode('LAND')
         self.wait_disarmed()
@@ -12965,6 +13044,7 @@ class AutoTestCopter(vehicle_test_suite.TestSuite):
             "AUTO_OPTIONS": 3,
         })
         self.set_rc(6, 2000)
+        self.reboot_sitl()
 
         self.upload_simple_relhome_mission([
             (mavutil.mavlink.MAV_CMD_NAV_TAKEOFF, 0, 0, 20),
@@ -13000,6 +13080,7 @@ class AutoTestCopter(vehicle_test_suite.TestSuite):
             "AUTO_OPTIONS": 3,
         })
         self.set_rc(6, 2000)
+        self.reboot_sitl()
 
         self.takeoff(mode='LOITER')
 
@@ -13859,6 +13940,40 @@ RTL_ALT 111
         self.reboot_sitl()
         self.assert_parameter_value("COMPASS_OFS_X", new_compass_ofs_x, epsilon=30)
 
+    def RudderDisarmMidair(self):
+        '''check disarm behaviour mid-air'''
+        self.change_mode('LOITER')
+        self.wait_ready_to_arm()
+        self.change_mode('STABILIZE')
+
+        # Set home current location, this gives a large home vs orgin difference
+        self.set_home(self.mav.location())
+
+        self.set_rc(4, 2000)
+        self.wait_armed()
+        self.set_rc(4, 1500)
+        self.set_rc(3, 2000)
+        self.wait_altitude(300, 20000, relative=True, timeout=10000)
+        self.hover()
+        self.set_rc(4, 1000)
+        self.delay_sim_time(11)
+        self.progress("Checking we are still armed")
+        self.assert_armed()
+
+        self.set_rc(3, 2000)
+        self.wait_altitude(300, 20000, relative=True)
+        self.set_rc(3, 1000)
+        self.set_rc(4, 1000)
+        self.delay_sim_time(11)
+        self.progress("Checking we disarm")
+        self.wait_disarmed(timeout=5)
+        self.set_rc(4, 1500)
+        self.arm_vehicle()
+        self.set_rc(3, 1600)
+        self.delay_sim_time(10)
+
+        self.do_RTL(timeout=600)
+
     def AHRSAutoTrim(self):
         '''calibrate AHRS trim using RC input'''
         self.progress("Making earth frame same as body frame")  # because I'm lazy
@@ -13986,6 +14101,30 @@ RTL_ALT 111
             raise NotAchievedException(f"RTL deviated from track {y_delta}m")
         self.context_pop()
         self.change_mode('LOITER')
+        self.do_RTL()
+
+    def ModeAllowsEntryWhenNoPilotInput(self):
+        '''test we can't enter modes when no RC input'''
+        self.upload_simple_relhome_mission([
+            (mavutil.mavlink.MAV_CMD_NAV_TAKEOFF, 0, 0, 20),
+            (mavutil.mavlink.MAV_CMD_NAV_WAYPOINT, 2000, 0, 20),
+            (mavutil.mavlink.MAV_CMD_NAV_RETURN_TO_LAUNCH, 0, 0, 0),
+        ])
+        self.set_parameters({
+            "AUTO_OPTIONS": 3,
+            "FS_THR_ENABLE": 4,  # continue in auto
+        })
+        self.change_mode('AUTO')
+        self.wait_ready_to_arm()
+        self.arm_vehicle()
+        self.wait_current_waypoint(2)
+        self.context_collect('STATUSTEXT')
+        self.set_rc(3, 200)
+        self.wait_statustext('Radio Failsafe', check_context=True)
+        self.send_cmd_do_set_mode('STABILIZE')
+        self.wait_statustext('in RC failsafe', check_context=True)
+        self.hover()
+        self.wait_statustext('Radio Failsafe Cleared', check_context=True)
         self.do_RTL()
 
     def RCOverridesNoRCReceiver(self):
@@ -14272,6 +14411,7 @@ RTL_ALT 111
             Test(self.DataFlashErase, attempts=8),
             self.Callisto,
             self.PerfInfo,
+            self.ModeAllowsEntryWhenNoPilotInput,
             self.Replay,
             self.FETtecESC,
             self.ProximitySensors,
@@ -14309,6 +14449,7 @@ RTL_ALT 111
             self.AHRSTrimLand,
             self.IBus,
             self.GuidedYawRate,
+            self.RudderDisarmMidair,
             self.NoArmWithoutMissionItems,
             self.DO_CHANGE_SPEED_in_guided,
             self.ArmSwitchAfterReboot,
@@ -14356,6 +14497,7 @@ RTL_ALT 111
             self.test_EKF3_option_disable_lane_switch,
             self.PLDNoParameters,
             self.PeriphMultiUARTTunnel,
+            self.EKF3SRCPerCore,
         ])
         return ret
 

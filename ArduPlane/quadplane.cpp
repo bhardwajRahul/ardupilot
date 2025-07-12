@@ -1981,9 +1981,9 @@ void QuadPlane::motors_output(bool run_rate_controller)
 
         // run low level rate controllers that only require IMU data and set loop time
         const float last_loop_time_s = AP::scheduler().get_last_loop_time_s();
-        motors->set_dt(last_loop_time_s);
-        attitude_control->set_dt(last_loop_time_s);
-        pos_control->set_dt(last_loop_time_s);
+        motors->set_dt_s(last_loop_time_s);
+        attitude_control->set_dt_s(last_loop_time_s);
+        pos_control->set_dt_s(last_loop_time_s);
         attitude_control->rate_controller_run();
         // reset sysid and other temporary inputs
         attitude_control->rate_controller_target_reset();
@@ -3104,7 +3104,7 @@ void QuadPlane::takeoff_controller(void)
     if (plane.arming.last_arm_method() == AP_Arming::Method::RUDDER &&
         (takeoff_last_run_ms == 0 ||
          now - takeoff_last_run_ms > 1000) &&
-        !plane.seen_neutral_rudder &&
+        !rc().seen_neutral_rudder() &&
         spool_state <= AP_Motors::DesiredSpoolState::GROUND_IDLE) {
         // start motor spinning if not spinning already so user sees it is armed
         set_desired_spool_state(AP_Motors::DesiredSpoolState::GROUND_IDLE);
